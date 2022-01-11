@@ -7,22 +7,66 @@
 
 namespace
 {
+
+// Window constants
 constexpr int windowWidth = 640;
 constexpr int windowHeight = 400;
 constexpr char windowTitle[] = "Poser";
 
+// OpenGL constants
 constexpr GLsizei shaderInfoLogLength = 512;
 
-constexpr std::array vertices = { 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f };
+// Geometry constants
+constexpr std::array vertices = { -0.5f, 0.0f, 0.0f, -0.5f, 1.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.5f, 1.0f, 0.0f };
 constexpr std::array indices = { 0u, 1u, 2u, 3u };
 
+// Color constants
 constexpr glm::vec4 clearColor = { 0.9f, 0.4f, 0.1f, 1.0f };
 constexpr glm::vec4 quadColor = { 0.1f, 0.4f, 0.9f, 1.0f };
+
+// Camera constants
+constexpr float cameraMinDistance = 0.5f;
+constexpr float cameraPositionY = 1.25f;
+constexpr float cameraTargetY = 0.5f;
+
+// Camera variables
+bool mouseCaptured = false;
+float cameraAngle = glm::radians(45.0f);
+float cameraDistance = 5.0f;
+double lastMouseX;
+
+void cursorPositionCallback(GLFWwindow* window, double x, double y)
+{
+  if (mouseCaptured)
+  {
+    const double deltaX = x - lastMouseX;
+    cameraAngle -= (static_cast<float>(deltaX * glm::pi<double>()) / windowWidth);
+  }
+  lastMouseX = x;
+}
+
+void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
+{
+  if (button == GLFW_MOUSE_BUTTON_LEFT)
+  {
+    mouseCaptured = (action == GLFW_PRESS);
+  }
+}
+
+void scrollCallback(GLFWwindow* window, double x, double y)
+{
+  cameraDistance -= static_cast<float>(y);
+  if (cameraDistance < cameraMinDistance)
+  {
+    cameraDistance = cameraMinDistance;
+  }
+}
+
 } // namespace
 
 int main()
 {
-  // Load window and OpenGL
+  // Create window and load OpenGL
   GLFWwindow* window;
   {
     if (!glfwInit())
@@ -43,8 +87,11 @@ int main()
       return EXIT_FAILURE;
     }
 
-    glfwMakeContextCurrent(window);
+    glfwSetCursorPosCallback(window, cursorPositionCallback);
+    glfwSetMouseButtonCallback(window, mouseButtonCallback);
+    glfwSetScrollCallback(window, scrollCallback);
 
+    glfwMakeContextCurrent(window);
     if (gladLoadGL(glfwGetProcAddress) == 0)
     {
       std::cerr << "Failed to load OpenGL";
@@ -82,6 +129,7 @@ int main()
   }
 
   // Set up a shader program
+  GLint viewUniformLocation;
   {
     // Compile the vertex shader
     GLuint vertexShader;
@@ -89,10 +137,10 @@ int main()
       vertexShader = glCreateShader(GL_VERTEX_SHADER);
 
       const GLchar* source = R"(#version 330 core
-                                uniform mat4 world;
+                                uniform mat4 view;
                                 uniform mat4 projection;
                                 in vec3 inPosition;
-                                void main() { gl_Position = projection * world * vec4(inPosition, 1.0); })";
+                                void main() { gl_Position = projection * view * vec4(inPosition, 1.0); })";
 
       glShaderSource(vertexShader, 1, &source, nullptr);
       glCompileShader(vertexShader);
@@ -163,19 +211,15 @@ int main()
     {
       glUseProgram(program);
 
-      // Set world matrix
+      // Retrieve view matrix location
       {
-        const GLint location = glGetUniformLocation(program, "world");
-        if (location < 0)
+        viewUniformLocation = glGetUniformLocation(program, "view");
+        if (viewUniformLocation < 0)
         {
-          std::cerr << "Failed to get world matrix uniform location";
+          std::cerr << "Failed to get view matrix uniform location";
           glfwTerminate();
           return EXIT_FAILURE;
         }
-
-        const glm::mat4 worldMatrix =
-          glm::scale(glm::translate(glm::mat4(1.0f), glm::vec3(10.0f, 10.0f, 0.0f)), glm::vec3(100.0f));
-        glUniformMatrix4fv(location, 1, GL_FALSE, glm::value_ptr(worldMatrix));
       }
 
       // Set projection matrix
@@ -189,7 +233,7 @@ int main()
         }
 
         const glm::mat4 projectionMatrix =
-          glm::ortho(0.0f, static_cast<float>(windowWidth), static_cast<float>(windowHeight), 0.0f, -1.0f, 1.0f);
+          glm::perspective(45.0f, static_cast<float>(windowWidth) / static_cast<float>(windowHeight), 0.1f, 100.0f);
         glUniformMatrix4fv(location, 1, GL_FALSE, glm::value_ptr(projectionMatrix));
       }
 
@@ -210,16 +254,29 @@ int main()
   }
 
   while (!glfwWindowShouldClose(window))
+  // Main loop
   {
-    glClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glDrawElements(GL_TRIANGLE_STRIP, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, 0);
+    // Render
+    {
+      glClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a);
+      glClear(GL_COLOR_BUFFER_BIT);
 
-    glfwSwapBuffers(window);
+      // Set view matrix
+      {
+        const glm::mat4 viewMatrix = glm::lookAt(glm::vec3(glm::sin(cameraAngle) * cameraDistance, cameraPositionY,
+                                                           glm::cos(cameraAngle) * cameraDistance),
+                                                 glm::vec3(0.0f, cameraTargetY, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        glUniformMatrix4fv(viewUniformLocation, 1, GL_FALSE, glm::value_ptr(viewMatrix));
+      }
+
+      glDrawElements(GL_TRIANGLE_STRIP, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, 0);
+
+      glfwSwapBuffers(window);
+    }
+
     glfwPollEvents();
   }
 
   glfwTerminate();
-
   return EXIT_SUCCESS;
 }
