@@ -1,9 +1,12 @@
+#include <assimp/Importer.hpp>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
 #include <glad/gl.h>
 #include <glfw/glfw3.h>
 #include <glm/gtc/type_ptr.hpp>
 
-#include <array>
 #include <iostream>
+#include <vector>
 
 namespace
 {
@@ -16,9 +19,8 @@ constexpr char windowTitle[] = "Poser";
 // OpenGL constants
 constexpr GLsizei shaderInfoLogLength = 512;
 
-// Geometry constants
-constexpr std::array vertices = { -0.5f, 0.0f, 0.0f, -0.5f, 1.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.5f, 1.0f, 0.0f };
-constexpr std::array indices = { 0u, 1u, 2u, 3u };
+// File constants
+constexpr char modelFileName[] = "models/model.blend";
 
 // Color constants
 constexpr glm::vec4 clearColor = { 0.9f, 0.4f, 0.1f, 1.0f };
@@ -30,14 +32,20 @@ constexpr float cameraPositionY = 1.25f;
 constexpr float cameraTargetY = 0.5f;
 
 // Camera variables
-bool mouseCaptured = false;
+bool mouseDown = false;
 float cameraAngle = glm::radians(45.0f);
 float cameraDistance = 5.0f;
 double lastMouseX;
+glm::mat4 viewMatrix;
+
+// Geometry variables
+std::vector<glm::vec3> vertices;
+std::vector<unsigned int> indices;
 
 void cursorPositionCallback(GLFWwindow* window, double x, double y)
 {
-  if (mouseCaptured)
+  if (mouseDown)
+  // Tumble the camera
   {
     const double deltaX = x - lastMouseX;
     cameraAngle -= (static_cast<float>(deltaX * glm::pi<double>()) / windowWidth);
@@ -48,13 +56,15 @@ void cursorPositionCallback(GLFWwindow* window, double x, double y)
 void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
 {
   if (button == GLFW_MOUSE_BUTTON_LEFT)
+  // Store mouse button state
   {
-    mouseCaptured = (action == GLFW_PRESS);
+    mouseDown = (action == GLFW_PRESS);
   }
 }
 
 void scrollCallback(GLFWwindow* window, double x, double y)
 {
+  // Dolly the camera
   cameraDistance -= static_cast<float>(y);
   if (cameraDistance < cameraMinDistance)
   {
@@ -97,6 +107,47 @@ int main()
       std::cerr << "Failed to load OpenGL";
       return EXIT_FAILURE;
     }
+
+    glClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a);
+  }
+
+  // Load a model
+  {
+    Assimp::Importer importer;
+
+    // Parse the file
+    const aiScene* scene = importer.ReadFile(modelFileName, aiProcess_Triangulate);
+    if (!scene)
+    {
+      std::cerr << "Failed to load model:\n" << importer.GetErrorString();
+      glfwTerminate();
+      return EXIT_FAILURE;
+    }
+
+    if (scene->mNumMeshes > 0)
+    // Load the first mesh if there is one
+    {
+      const aiMesh* mesh = scene->mMeshes[0];
+
+      // Load the vertices
+      vertices.resize(static_cast<size_t>(mesh->mNumVertices));
+      for (unsigned int i = 0u; i < mesh->mNumVertices; ++i)
+      {
+        const aiVector3D& vertex = mesh->mVertices[i];
+        vertices.at(i) = glm::vec3(vertex.x, vertex.y, vertex.z);
+      }
+
+      // Load the indices
+      indices.resize(static_cast<size_t>(mesh->mNumFaces) * 3u);
+      for (unsigned int i = 0u; i < mesh->mNumFaces; ++i)
+      {
+        const aiFace& face = mesh->mFaces[i];
+        assert(face.mNumIndices == 3u);
+        indices.at(static_cast<size_t>(i) * 3u + 0u) = face.mIndices[0];
+        indices.at(static_cast<size_t>(i) * 3u + 1u) = face.mIndices[1];
+        indices.at(static_cast<size_t>(i) * 3u + 2u) = face.mIndices[2];
+      }
+    }
   }
 
   // Set up some geometry
@@ -113,7 +164,8 @@ int main()
       GLuint vertexBuffer;
       glGenBuffers(1, &vertexBuffer);
       glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
-      glBufferData(GL_ARRAY_BUFFER, sizeof(float) * vertices.size(), vertices.data(), GL_STATIC_DRAW);
+      glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(sizeof(glm::vec3) * vertices.size()), vertices.data(),
+                   GL_STATIC_DRAW);
 
       glEnableVertexAttribArray(0);
       glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(float) * 3, reinterpret_cast<void*>(sizeof(float) * 0));
@@ -124,7 +176,8 @@ int main()
     {
       glGenBuffers(1, &indexBuffer);
       glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffer);
-      glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(unsigned int) * indices.size(), indices.data(), GL_STATIC_DRAW);
+      glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(sizeof(unsigned int) * indices.size()),
+                   indices.data(), GL_STATIC_DRAW);
     }
   }
 
@@ -258,18 +311,17 @@ int main()
   {
     // Render
     {
-      glClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a);
       glClear(GL_COLOR_BUFFER_BIT);
 
       // Set view matrix
       {
-        const glm::mat4 viewMatrix = glm::lookAt(glm::vec3(glm::sin(cameraAngle) * cameraDistance, cameraPositionY,
-                                                           glm::cos(cameraAngle) * cameraDistance),
-                                                 glm::vec3(0.0f, cameraTargetY, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        viewMatrix = glm::lookAt(glm::vec3(glm::sin(cameraAngle) * cameraDistance, cameraPositionY,
+                                           glm::cos(cameraAngle) * cameraDistance),
+                                 glm::vec3(0.0f, cameraTargetY, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
         glUniformMatrix4fv(viewUniformLocation, 1, GL_FALSE, glm::value_ptr(viewMatrix));
       }
 
-      glDrawElements(GL_TRIANGLE_STRIP, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, 0);
+      glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, 0);
 
       glfwSwapBuffers(window);
     }
