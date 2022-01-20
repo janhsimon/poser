@@ -16,7 +16,7 @@ namespace
 struct Vertex
 {
   glm::vec3 position;
-  glm::ivec4 boneIds;    // Which bones affect this vertex (indices into the bone transforms array)
+  glm::ivec4 boneIds;    // Which bones affect this vertex (indices into the bone and bone transform array)
   glm::vec4 boneWeights; // How much each indexed bone affects this vertex, elements sum up to 1.0
 };
 
@@ -25,6 +25,8 @@ struct Bone
 {
   glm::mat4 inverseBindMatrix; // Inverse bind pose bone transform (transforms from unposed bone to model space origin)
   glm::mat4 posedTransform;    // Posed bone transform in bone space (translation * rotation * scale)
+  std::vector<glm::mat4> translationKeyframes, rotationKeyframes, scaleKeyframes;
+  Bone* parent;
 };
 
 // Window constants
@@ -62,85 +64,81 @@ std::vector<Vertex> vertices;
 std::vector<unsigned int> indices;
 
 // Animation variables
-Assimp::Importer importer;
 std::vector<Bone> bones;
 std::vector<glm::mat4> boneTransforms; // Transforms from unposed to posed bone in model space
 unsigned int frameIndex = 0u;          // Current animation frame
 
-glm::mat4 assimpToGlmMat4(const aiMatrix4x4& m)
+glm::mat4 assimpToGlmMat4(const aiMatrix4x4& matrix)
 {
-  return glm::transpose(glm::make_mat4(&m.a1)); // Convert row-major (assimp) to column-major (glm)
+  return glm::transpose(glm::make_mat4(&matrix.a1)); // Convert row-major (assimp) to column-major (glm)
 }
 
-int findNamedBone(const aiString& name)
+int findNamedBone(const aiScene* scene, const aiString& name)
 {
-  const aiMesh* mesh = importer.GetScene()->mMeshes[0];
-  for (unsigned int i = 0; i < mesh->mNumBones; ++i)
+  const aiMesh* mesh = scene->mMeshes[0];
+  for (unsigned int i = 0u; i < mesh->mNumBones; ++i)
   {
-    if (name == mesh->mBones[i]->mName)
+    if (mesh->mBones[i]->mName == name)
     {
       return static_cast<int>(i);
     }
   }
+
   return -1;
 }
 
-void processNode(const aiNode* node, const glm::mat4& parentTransform)
+void loadSkeletonNode(const aiScene* scene, const aiNode* node, Bone* parent)
 {
-  glm::mat4 globalTransform = parentTransform;
-
-  // Check if this node is a bone
-  const int boneIndex = findNamedBone(node->mName);
-  if (boneIndex > -1)
+  const int boneIndex = findNamedBone(scene, node->mName);
+  if (boneIndex >= 0)
   {
-    const Bone& bone = bones.at(static_cast<size_t>(boneIndex));
-
-    // Posed bone transform in model space (transforms from the model space origin to the posed bone)
-    globalTransform *= bone.posedTransform;
-
-    // Store the transform from the unposed to the posed bone in model space by transforming from the unposed bone to
-    // the model space origin (through the inverse bind matrix) and then from there to the posed bone in model space
-    boneTransforms.at(static_cast<size_t>(boneIndex)) = globalTransform * bone.inverseBindMatrix;
+    Bone& bone = bones.at(boneIndex);
+    bone.parent = parent;
+    parent = &bone;
   }
 
   // Process the children of this node recursively
   for (unsigned int i = 0u; i < node->mNumChildren; ++i)
   {
-    processNode(node->mChildren[i], globalTransform);
+    loadSkeletonNode(scene, node->mChildren[i], parent);
   }
 }
 
 void updateAnimation()
 {
-  const aiScene* scene = importer.GetScene();
-  const aiAnimation* animation = scene->mAnimations[0];
-
-  // Load the local bone transforms for the current animation frame
-  for (unsigned int i = 0u; i < animation->mNumChannels; ++i)
+  // Update the new posed transform at the current animation frame for each bone in bone space
+  for (size_t i = 0u; i < bones.size(); ++i)
   {
-    const aiNodeAnim* channel = animation->mChannels[i];
+    Bone& bone = bones.at(i);
 
-    // Skip channels that do not represent a bone
-    const int boneIndex = findNamedBone(channel->mNodeName);
-    if (boneIndex < 0)
-    {
-      continue;
-    }
+    const glm::mat4 translation = bone.translationKeyframes.at(frameIndex % bone.translationKeyframes.size());
+    const glm::mat4 rotation = bone.rotationKeyframes.at(frameIndex % bone.rotationKeyframes.size());
+    const glm::mat4 scale = bone.scaleKeyframes.at(frameIndex % bone.scaleKeyframes.size());
 
-    const aiVector3D& translation = channel->mPositionKeys[frameIndex % channel->mNumPositionKeys].mValue;
-    const aiQuaternion& rotation = channel->mRotationKeys[frameIndex % channel->mNumRotationKeys].mValue;
-    const aiVector3D& scale = channel->mScalingKeys[frameIndex % channel->mNumScalingKeys].mValue;
-
-    const glm::mat4 t = glm::translate(glm::mat4(1.0f), glm::vec3(translation.x, translation.y, translation.z));
-    const glm::mat4 r = glm::toMat4(glm::quat(rotation.w, rotation.x, rotation.y, rotation.z));
-    const glm::mat4 s = glm::scale(glm::mat4(1.0f), glm::vec3(scale.x, scale.y, scale.z));
-
-    // Store the new transform of the posed bone in bone space
-    bones.at(boneIndex).posedTransform = t * r * s;
+    bone.posedTransform = translation * rotation * scale;
   }
 
-  // Re-process the entire skeletal hierarchy, starting from the root node
-  processNode(scene->mRootNode, glm::mat4(1.0f));
+  // Update the transform from the unposed to the posed bone for each bone in model space
+  for (size_t i = 0u; i < bones.size(); ++i)
+  {
+    const Bone& bone = bones.at(i);
+
+    // Find the posed bone transform in model space (transforms from the model space origin to the posed bone)
+    glm::mat4 posedTransform = bone.posedTransform;
+    {
+      // Multiply the posed bone transforms of all previous bones in the hierarchy to find the posed bone transform
+      Bone* parent = bone.parent;
+      while (parent)
+      {
+        posedTransform = parent->posedTransform * posedTransform;
+        parent = parent->parent;
+      }
+    }
+
+    // Store the transform from the unposed to the posed bone in model space by transforming from the unposed bone to
+    // the model space origin (through the inverse bind matrix) and then from there to the posed bone in model space
+    boneTransforms.at(i) = posedTransform * bone.inverseBindMatrix;
+  }
 }
 
 void cursorPositionCallback(GLFWwindow* window, double x, double y)
@@ -214,6 +212,8 @@ int main()
 
   // Load a model
   {
+    Assimp::Importer importer;
+
     // Parse the file
     const aiScene* scene = importer.ReadFile(modelFileName, aiProcess_Triangulate | aiProcess_JoinIdenticalVertices);
     if (!scene)
@@ -284,6 +284,58 @@ int main()
         }
       }
     }
+
+    // Load the first animation
+    {
+      const aiAnimation* animation = scene->mAnimations[0];
+
+      // Load the keyframes for each bone
+      for (unsigned int i = 0u; i < animation->mNumChannels; ++i)
+      {
+        const aiNodeAnim* channel = animation->mChannels[i];
+
+        const int boneIndex = findNamedBone(scene, channel->mNodeName);
+        if (boneIndex < 0)
+        {
+          continue;
+        }
+
+        Bone& bone = bones.at(boneIndex);
+
+        // Translation keyframes
+        {
+          bone.translationKeyframes.resize(channel->mNumPositionKeys);
+          for (unsigned int j = 0u; j < channel->mNumPositionKeys; ++j)
+          {
+            const aiVector3D& translation = channel->mPositionKeys[j].mValue;
+            bone.translationKeyframes.at(j) = glm::translate(glm::mat4(1.0f), glm::make_vec3(&translation.x));
+          }
+        }
+
+        // Rotation keyframes
+        {
+          bone.rotationKeyframes.resize(channel->mNumRotationKeys);
+          for (unsigned int j = 0u; j < channel->mNumRotationKeys; ++j)
+          {
+            const aiQuaternion& rotation = channel->mRotationKeys[j].mValue;
+            bone.rotationKeyframes.at(j) = glm::toMat4(glm::quat(rotation.w, rotation.x, rotation.y, rotation.z));
+          }
+        }
+
+        // Scale keyframes
+        {
+          bone.scaleKeyframes.resize(channel->mNumScalingKeys);
+          for (unsigned int j = 0u; j < channel->mNumScalingKeys; ++j)
+          {
+            const aiVector3D& scale = channel->mScalingKeys[j].mValue;
+            bone.scaleKeyframes.at(j) = glm::scale(glm::mat4(1.0f), glm::make_vec3(&scale.x));
+          }
+        }
+      }
+    }
+
+    // Load the skeleton
+    loadSkeletonNode(scene, scene->mRootNode, nullptr);
   }
 
   // Set up geometry
