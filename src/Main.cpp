@@ -15,7 +15,7 @@ namespace
 // Vertex definition
 struct Vertex
 {
-  glm::vec3 position;
+  glm::vec3 position, normal;
   glm::ivec4 boneIds;    // Which bones affect this vertex (indices into the bone and bone transform array)
   glm::vec4 boneWeights; // How much each indexed bone affects this vertex, elements sum up to 1.0
 };
@@ -43,7 +43,7 @@ constexpr char modelFileName[] = "models/silly_dancing.fbx";
 
 // Color constants
 constexpr glm::vec4 clearColor = { 0.9f, 0.4f, 0.1f, 1.0f };
-constexpr glm::vec4 quadColor = { 0.1f, 0.4f, 0.9f, 1.0f };
+constexpr glm::vec4 geometryColor = { 0.1f, 0.4f, 0.9f, 1.0f };
 
 // Camera constants
 constexpr float cameraMinDistance = 0.5f;
@@ -208,6 +208,7 @@ int main()
     }
 
     glClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a);
+    glEnable(GL_DEPTH_TEST);
   }
 
   // Load a model
@@ -215,7 +216,8 @@ int main()
     Assimp::Importer importer;
 
     // Parse the file
-    const aiScene* scene = importer.ReadFile(modelFileName, aiProcess_Triangulate | aiProcess_JoinIdenticalVertices);
+    constexpr int flags = aiProcess_Triangulate | aiProcess_JoinIdenticalVertices | aiProcess_GenNormals;
+    const aiScene* scene = importer.ReadFile(modelFileName, flags);
     if (!scene)
     {
       std::cerr << "Failed to load model:\n" << importer.GetErrorString();
@@ -243,8 +245,19 @@ int main()
       vertices.resize(static_cast<size_t>(mesh->mNumVertices));
       for (unsigned int i = 0u; i < mesh->mNumVertices; ++i)
       {
-        const aiVector3D& vertex = mesh->mVertices[i];
-        vertices.at(i).position = glm::vec3(vertex.x, vertex.y, vertex.z);
+        Vertex& vertex = vertices.at(i);
+
+        // Position
+        {
+          const aiVector3D& position = mesh->mVertices[i];
+          vertex.position = glm::vec3(position.x, position.y, position.z);
+        }
+
+        // Normal
+        {
+          const aiVector3D& normal = mesh->mNormals[i];
+          vertex.normal = glm::vec3(normal.x, normal.y, normal.z);
+        }
 
         // These will be set in the next step
         vertices.at(i).boneIds = glm::ivec4(-1);
@@ -372,10 +385,14 @@ int main()
                             reinterpret_cast<void*>(offsetof(Vertex, position)));
 
       glEnableVertexAttribArray(1);
-      glVertexAttribIPointer(1, 4, GL_INT, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, boneIds)));
+      glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                            reinterpret_cast<void*>(offsetof(Vertex, normal)));
 
       glEnableVertexAttribArray(2);
-      glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+      glVertexAttribIPointer(2, 4, GL_INT, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, boneIds)));
+
+      glEnableVertexAttribArray(3);
+      glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex),
                             reinterpret_cast<void*>(offsetof(Vertex, boneWeights)));
     }
   }
@@ -393,8 +410,10 @@ int main()
                                 uniform mat4 projection;
                                 uniform mat4 boneTransforms[64];
                                 layout(location = 0) in vec3 inPosition;
-                                layout(location = 1) in ivec4 inBoneIds;
-                                layout(location = 2) in vec4 inBoneWeights;
+                                layout(location = 1) in vec3 inNormal;
+                                layout(location = 2) in ivec4 inBoneIds;
+                                layout(location = 3) in vec4 inBoneWeights;
+                                out vec3 normal;
                                 void main()
                                 {
                                   mat4 boneTransform = mat4(0.0);
@@ -403,6 +422,7 @@ int main()
                                     boneTransform += boneTransforms[inBoneIds[i]] * inBoneWeights[i];
                                   }
                                   gl_Position = projection * view * boneTransform * vec4(inPosition, 1.0);
+                                  normal = normalize((boneTransform * vec4(inNormal, 0.0)).xyz);
                                 })";
 
       glShaderSource(vertexShader, 1, &source, nullptr);
@@ -427,8 +447,13 @@ int main()
 
       const GLchar* source = R"(#version 150 core
                                 uniform vec4 color;
+                                in vec3 normal;
                                 out vec4 fragColor;
-                                void main() { fragColor = color; })";
+                                void main()
+                                {
+                                  float diffuse = dot(normal, vec3(1.0));
+                                  fragColor = vec4(color.rgb * diffuse, color.a);
+                                })";
 
       glShaderSource(fragmentShader, 1, &source, nullptr);
       glCompileShader(fragmentShader);
@@ -520,7 +545,7 @@ int main()
           return EXIT_FAILURE;
         }
 
-        const glm::vec4 color = glm::vec4(quadColor.r, quadColor.g, quadColor.b, quadColor.a);
+        const glm::vec4 color = glm::vec4(geometryColor.r, geometryColor.g, geometryColor.b, geometryColor.a);
         glUniform4fv(location, 1, glm::value_ptr(color));
       }
     }
@@ -537,7 +562,7 @@ int main()
 
     // Render
     {
-      glClear(GL_COLOR_BUFFER_BIT);
+      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
       // Set view matrix uniform
       {
